@@ -133,6 +133,9 @@ folium.GeoJson(
     interactive=False,
 ).add_to(mapa_folium)
 escala.add_to(mapa_folium)
+folium.Element(
+    "<style>.legend text { fill: #ffffff !important; }</style>"
+).add_to(mapa_folium.get_root().header)
 
 components.html(mapa_folium.get_root().render(), height=760, scrolling=False)
 
