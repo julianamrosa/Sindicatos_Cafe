@@ -52,9 +52,14 @@ def carregar_ibge():
         sessao.mount("https://", HTTPAdapter(max_retries=tentativas))
         respostas = []
         for url in (URL_MUNICIPIOS, URL_MALHA, URL_MALHA_ESTADO):
-            resposta = sessao.get(url, timeout=(10, 60))
-            resposta.raise_for_status()
-            respostas.append(resposta.json())
+            try:
+                resposta = sessao.get(url, timeout=(10, 60))
+                resposta.raise_for_status()
+                respostas.append(resposta.json())
+            except (requests.exceptions.RequestException, ValueError) as erro:
+                raise ValueError(
+                    f"Falha ao consultar {url}: {type(erro).__name__}: {erro}"
+                ) from erro
     municipios, malha, malha_estado = respostas
     tabela = pd.DataFrame(
         {"codigo": str(m["id"]), "Município IBGE": m["nome"], "chave": normalizar(m["nome"])}
@@ -90,6 +95,7 @@ except (requests.exceptions.RequestException, ValueError):
         "temporariamente indisponível ou inacessível a partir do servidor do app. "
         "Aguarde alguns instantes e tente novamente."
     )
+    st.caption(f"Detalhes técnicos: {erro}")
     if st.button("Tentar novamente"):
         st.rerun()
     st.stop()
