@@ -88,14 +88,15 @@ st.title("Produção de Café por Município – Minas Gerais")
 try:
     with st.spinner("Carregando dados do IBGE..."):
         ibge, malha, malha_estado = carregar_ibge()
-except (requests.exceptions.RequestException, ValueError):
+except (requests.exceptions.RequestException, ValueError) as erro:
+    detalhes_erro = str(erro)
     logging.getLogger(__name__).exception("Falha ao carregar dados do IBGE")
     st.error(
         "Não foi possível carregar os dados do IBGE. O serviço pode estar "
         "temporariamente indisponível ou inacessível a partir do servidor do app. "
         "Aguarde alguns instantes e tente novamente."
     )
-    st.caption(f"Detalhes técnicos: {erro}")
+    st.caption(f"Detalhes técnicos: {detalhes_erro}")
     if st.button("Tentar novamente"):
         st.rerun()
     st.stop()
