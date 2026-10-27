@@ -53,10 +53,24 @@ def carregar_dados():
         st.error(f"Colunas não encontradas. Colunas disponíveis: {list(df.columns)}")
         st.stop()
 
-    df = df.rename(columns={col_mun: "Município", col_qtd: COL_QTD})
+    col_rs = achar_coluna(df.columns, "razaosocial")
+    if not col_rs:
+        st.error(f"Coluna 'Razao Social' não encontrada. Colunas disponíveis: {list(df.columns)}")
+        st.stop()
+
+    df = df.rename(columns={col_mun: "Município", col_qtd: COL_QTD, col_rs: "Razao Social"})
     df[COL_QTD] = pd.to_numeric(df[COL_QTD].astype(str).str.replace(",", ".", regex=False), errors="coerce")
     df["chave"] = df["Município"].map(normalizar)
-    return df.drop_duplicates(subset="chave", keep="first")[["chave", "Município", COL_QTD]]
+    df["Razao Social"] = df["Razao Social"].fillna("").astype(str).str.strip()
+    # Produção é a mesma nas repetições (não soma); apenas os nomes são reunidos.
+    sindicatos = (
+        df.groupby("chave")["Razao Social"]
+        .agg(lambda s: " e ".join(dict.fromkeys(n for n in s if n)))
+        .rename("Sindicato")
+        .reset_index()
+    )
+    unico = df.drop_duplicates(subset="chave", keep="first")[["chave", "Município", COL_QTD]]
+    return unico.merge(sindicatos, on="chave")
 
 
 st.title("Produção de Café por Município – Minas Gerais")
@@ -76,12 +90,13 @@ except (OSError, ValueError) as erro:
     st.stop()
 
 dados = carregar_dados()
-mapa = ibge.merge(dados[["chave", COL_QTD]], on="chave", how="left")
+mapa = ibge.merge(dados[["chave", COL_QTD, "Sindicato"]], on="chave", how="left")
 com_dados = mapa.dropna(subset=[COL_QTD])
 nao_encontrados = dados.loc[~dados["chave"].isin(ibge["chave"]), "Município"].tolist()
 
 producao = dict(zip(mapa["codigo"], mapa[COL_QTD]))
 nomes = dict(zip(mapa["codigo"], mapa["Município IBGE"]))
+sindicatos = dict(zip(mapa["codigo"], mapa["Sindicato"]))
 max_producao = float(mapa[COL_QTD].max()) if not com_dados.empty else 1
 escala = linear.YlOrRd_09.scale(0, max(max_producao, 1))
 escala.caption = "Quantidade produzida (Ton)"
@@ -93,6 +108,8 @@ for feature in malha["features"]:
         valor_producao = None
     feature["properties"]["municipio_nome"] = nomes.get(codigo, "")
     feature["properties"]["producao_ton"] = valor_producao
+    nome_sindicato = sindicatos.get(codigo)
+    feature["properties"]["sindicato"] = nome_sindicato if isinstance(nome_sindicato, str) and nome_sindicato else "-"
     feature["properties"]["producao_label"] = (
         f"{valor_producao:,.0f}" if valor_producao is not None else "Sem dados"
     )
@@ -121,8 +138,8 @@ camada = folium.GeoJson(
         "fillOpacity": 0.8 if feature["properties"]["producao_ton"] is not None else 0,
     },
     tooltip=folium.GeoJsonTooltip(
-        fields=["municipio_nome", "producao_label"],
-        aliases=["Município:", "Produção (Ton):"],
+        fields=["municipio_nome", "sindicato", "producao_label"],
+        aliases=["Município:", "Sindicato:", "Produção (Ton):"],
         localize=True,
         sticky=False,
     ),
@@ -143,7 +160,9 @@ folium.GeoJson(
 ).add_to(mapa_folium)
 escala.add_to(mapa_folium)
 folium.Element(
-    "<style>.legend text { fill: #ffffff !important; }</style>"
+    "<style>.legend text { fill: #ffffff !important; }"
+    ".leaflet-tooltip { white-space: normal !important; width: max-content; max-width: 380px; }"
+    ".leaflet-tooltip table { white-space: normal !important; }</style>"
 ).add_to(mapa_folium.get_root().header)
 
 components.html(mapa_folium.get_root().render(), height=760, scrolling=False)
