@@ -1,3 +1,4 @@
+import logging
 import re
 import unicodedata
 from pathlib import Path
@@ -6,8 +7,10 @@ import pandas as pd
 import folium
 from branca.colormap import linear
 import requests
+from requests.adapters import HTTPAdapter
 import streamlit as st
 import streamlit.components.v1 as components
+from urllib3.util.retry import Retry
 
 st.set_page_config(page_title="Produção de Café por Município", layout="wide")
 
@@ -38,9 +41,21 @@ def achar_coluna(colunas, *termos):
 
 @st.cache_data
 def carregar_ibge():
-    municipios = requests.get(URL_MUNICIPIOS, timeout=60).json()
-    malha = requests.get(URL_MALHA, timeout=60).json()
-    malha_estado = requests.get(URL_MALHA_ESTADO, timeout=60).json()
+    tentativas = Retry(
+        total=2,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=("GET",),
+        respect_retry_after_header=False,
+    )
+    with requests.Session() as sessao:
+        sessao.mount("https://", HTTPAdapter(max_retries=tentativas))
+        respostas = []
+        for url in (URL_MUNICIPIOS, URL_MALHA, URL_MALHA_ESTADO):
+            resposta = sessao.get(url, timeout=(10, 60))
+            resposta.raise_for_status()
+            respostas.append(resposta.json())
+    municipios, malha, malha_estado = respostas
     tabela = pd.DataFrame(
         {"codigo": str(m["id"]), "Município IBGE": m["nome"], "chave": normalizar(m["nome"])}
         for m in municipios
@@ -63,13 +78,26 @@ def carregar_dados():
     return df.drop_duplicates(subset="chave", keep="first")[["chave", "Município", COL_QTD]]
 
 
-ibge, malha, malha_estado = carregar_ibge()
+st.title("Produção de Café por Município – Minas Gerais")
+
+try:
+    with st.spinner("Carregando dados do IBGE..."):
+        ibge, malha, malha_estado = carregar_ibge()
+except (requests.exceptions.RequestException, ValueError):
+    logging.getLogger(__name__).exception("Falha ao carregar dados do IBGE")
+    st.error(
+        "Não foi possível carregar os dados do IBGE. O serviço pode estar "
+        "temporariamente indisponível ou inacessível a partir do servidor do app. "
+        "Aguarde alguns instantes e tente novamente."
+    )
+    if st.button("Tentar novamente"):
+        st.rerun()
+    st.stop()
+
 dados = carregar_dados()
 mapa = ibge.merge(dados[["chave", COL_QTD]], on="chave", how="left")
 com_dados = mapa.dropna(subset=[COL_QTD])
 nao_encontrados = dados.loc[~dados["chave"].isin(ibge["chave"]), "Município"].tolist()
-
-st.title("Produção de Café por Município – Minas Gerais")
 
 producao = dict(zip(mapa["codigo"], mapa[COL_QTD]))
 nomes = dict(zip(mapa["codigo"], mapa["Município IBGE"]))
