@@ -1,4 +1,4 @@
-import logging
+import json
 import re
 import unicodedata
 from pathlib import Path
@@ -6,24 +6,13 @@ from pathlib import Path
 import pandas as pd
 import folium
 from branca.colormap import linear
-import requests
-from requests.adapters import HTTPAdapter
 import streamlit as st
 import streamlit.components.v1 as components
-from urllib3.util.retry import Retry
 
 st.set_page_config(page_title="Produção de Café por Município", layout="wide")
 
 ARQUIVO = Path(__file__).parent / "EntidadesSindicais2.xlsx"
-URL_MUNICIPIOS = "https://servicodados.ibge.gov.br/api/v1/localidades/estados/31/municipios"
-URL_MALHA = (
-    "https://servicodados.ibge.gov.br/api/v3/malhas/estados/31"
-    "?formato=application/vnd.geo%2Bjson&intrarregiao=municipio&qualidade=minima"
-)
-URL_MALHA_ESTADO = (
-    "https://servicodados.ibge.gov.br/api/v3/malhas/estados/31"
-    "?formato=application/vnd.geo%2Bjson&qualidade=minima"
-)
+PASTA_DADOS_IBGE = Path(__file__).parent / "dados_ibge"
 COL_QTD = "Quantidade produzida (Ton)"
 
 
@@ -41,26 +30,13 @@ def achar_coluna(colunas, *termos):
 
 @st.cache_data
 def carregar_ibge():
-    tentativas = Retry(
-        total=2,
-        backoff_factor=0.5,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=("GET",),
-        respect_retry_after_header=False,
-    )
-    with requests.Session() as sessao:
-        sessao.mount("https://", HTTPAdapter(max_retries=tentativas))
-        respostas = []
-        for url in (URL_MUNICIPIOS, URL_MALHA, URL_MALHA_ESTADO):
-            try:
-                resposta = sessao.get(url, timeout=(10, 60))
-                resposta.raise_for_status()
-                respostas.append(resposta.json())
-            except (requests.exceptions.RequestException, ValueError) as erro:
-                raise ValueError(
-                    f"Falha ao consultar {url}: {type(erro).__name__}: {erro}"
-                ) from erro
-    municipios, malha, malha_estado = respostas
+    with (PASTA_DADOS_IBGE / "municipios.json").open(encoding="utf-8") as arquivo:
+        municipios = json.load(arquivo)
+    with (PASTA_DADOS_IBGE / "malha_municipios.geojson").open(encoding="utf-8") as arquivo:
+        malha = json.load(arquivo)
+    with (PASTA_DADOS_IBGE / "malha_mg.geojson").open(encoding="utf-8") as arquivo:
+        malha_estado = json.load(arquivo)
+
     tabela = pd.DataFrame(
         {"codigo": str(m["id"]), "Município IBGE": m["nome"], "chave": normalizar(m["nome"])}
         for m in municipios
@@ -86,15 +62,13 @@ def carregar_dados():
 st.title("Produção de Café por Município – Minas Gerais")
 
 try:
-    with st.spinner("Carregando dados do IBGE..."):
+    with st.spinner("Carregando dados geográficos locais..."):
         ibge, malha, malha_estado = carregar_ibge()
-except (requests.exceptions.RequestException, ValueError) as erro:
+except (OSError, ValueError) as erro:
     detalhes_erro = str(erro)
-    logging.getLogger(__name__).exception("Falha ao carregar dados do IBGE")
     st.error(
-        "Não foi possível carregar os dados do IBGE. O serviço pode estar "
-        "temporariamente indisponível ou inacessível a partir do servidor do app. "
-        "Aguarde alguns instantes e tente novamente."
+        "Não foi possível carregar os arquivos geográficos locais. "
+        "Verifique se os três arquivos estão na pasta dados_ibge."
     )
     st.caption(f"Detalhes técnicos: {detalhes_erro}")
     if st.button("Tentar novamente"):
