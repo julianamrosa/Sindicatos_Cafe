@@ -58,15 +58,21 @@ def carregar_dados():
         st.error(f"Coluna 'Razao Social' não encontrada. Colunas disponíveis: {list(df.columns)}")
         st.stop()
 
-    df = df.rename(columns={col_mun: "Município", col_qtd: COL_QTD, col_rs: "Razao Social"})
+    col_sit = achar_coluna(df.columns, "situacao", "cadastro")
+    if not col_sit:
+        st.error(f"Coluna 'Situacao do Cadastro' não encontrada. Colunas disponíveis: {list(df.columns)}")
+        st.stop()
+
+    df = df.rename(columns={col_mun: "Município", col_qtd: COL_QTD, col_rs: "Razao Social", col_sit: "Situacao"})
     df[COL_QTD] = pd.to_numeric(df[COL_QTD].astype(str).str.replace(",", ".", regex=False), errors="coerce")
     df["chave"] = df["Município"].map(normalizar)
     df["Razao Social"] = df["Razao Social"].fillna("").astype(str).str.strip()
     # Produção é a mesma nas repetições (não soma); apenas os nomes são reunidos.
+    df["Situacao"] = df["Situacao"].fillna("").astype(str).str.strip()
+    juntar = lambda s: " e ".join(dict.fromkeys(n for n in s if n))
     sindicatos = (
-        df.groupby("chave")["Razao Social"]
-        .agg(lambda s: " e ".join(dict.fromkeys(n for n in s if n)))
-        .rename("Sindicato")
+        df.groupby("chave")
+        .agg(Sindicato=("Razao Social", juntar), Situacao=("Situacao", juntar))
         .reset_index()
     )
     unico = df.drop_duplicates(subset="chave", keep="first")[["chave", "Município", COL_QTD]]
@@ -90,13 +96,14 @@ except (OSError, ValueError) as erro:
     st.stop()
 
 dados = carregar_dados()
-mapa = ibge.merge(dados[["chave", COL_QTD, "Sindicato"]], on="chave", how="left")
+mapa = ibge.merge(dados[["chave", COL_QTD, "Sindicato", "Situacao"]], on="chave", how="left")
 com_dados = mapa.dropna(subset=[COL_QTD])
 nao_encontrados = dados.loc[~dados["chave"].isin(ibge["chave"]), "Município"].tolist()
 
 producao = dict(zip(mapa["codigo"], mapa[COL_QTD]))
 nomes = dict(zip(mapa["codigo"], mapa["Município IBGE"]))
 sindicatos = dict(zip(mapa["codigo"], mapa["Sindicato"]))
+situacoes = dict(zip(mapa["codigo"], mapa["Situacao"]))
 max_producao = float(mapa[COL_QTD].max()) if not com_dados.empty else 1
 escala = linear.YlOrRd_09.scale(0, max(max_producao, 1))
 escala.caption = "Quantidade produzida (Ton)"
@@ -110,8 +117,10 @@ for feature in malha["features"]:
     feature["properties"]["producao_ton"] = valor_producao
     nome_sindicato = sindicatos.get(codigo)
     feature["properties"]["sindicato"] = nome_sindicato if isinstance(nome_sindicato, str) and nome_sindicato else "-"
+    situacao = situacoes.get(codigo)
+    feature["properties"]["situacao"] = situacao if isinstance(situacao, str) and situacao else "-"
     feature["properties"]["producao_label"] = (
-        f"{valor_producao:,.0f}" if valor_producao is not None else "Sem dados"
+        f"{valor_producao:,.0f}" if valor_producao is not None else "-"
     )
 
 mapa_folium = folium.Map(location=[-18.5, -44.5], zoom_start=6, tiles=None)
@@ -138,8 +147,8 @@ camada = folium.GeoJson(
         "fillOpacity": 0.8 if feature["properties"]["producao_ton"] is not None else 0,
     },
     tooltip=folium.GeoJsonTooltip(
-        fields=["municipio_nome", "sindicato", "producao_label"],
-        aliases=["Município:", "Sindicato:", "Produção (Ton):"],
+        fields=["municipio_nome", "sindicato", "situacao", "producao_label"],
+        aliases=["Município:", "Sindicato:", "Situação do Cadastro:", "Produção (Ton):"],
         localize=True,
         sticky=False,
     ),
