@@ -9,7 +9,7 @@ from branca.colormap import linear
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="Produção de Café por Município", layout="wide")
+st.set_page_config(page_title="Municípios Produtores de Café - Minas Gerais - 2025", layout="wide")
 
 ARQUIVO = Path(__file__).parent / "EntidadesSindicais2.xlsx"
 PASTA_DADOS_IBGE = Path(__file__).parent / "dados_ibge"
@@ -46,40 +46,46 @@ def carregar_ibge():
 
 @st.cache_data
 def carregar_dados():
-    df = pd.read_excel(ARQUIVO)
-    col_mun = achar_coluna(df.columns, "municipio")
-    col_qtd = achar_coluna(df.columns, "quantidade", "produzida") or achar_coluna(df.columns, "ton")
-    if not col_mun or not col_qtd:
-        st.error(f"Colunas não encontradas. Colunas disponíveis: {list(df.columns)}")
+    df = pd.read_excel(ARQUIVO, sheet_name="Nova base")
+    colunas = {
+        "IBGE": "codigo",
+        "Municipio": "Município",
+        "Produz_Cafe": "Produz Cafe",
+        "Producao_Ton": COL_QTD,
+        "Tem_Sindicato": "Tem Sindicato",
+        "Razao_Social": "Razao Social",
+        "Situacao_do_Cadastro": "Situacao",
+    }
+    faltantes = set(colunas) - set(df.columns)
+    if faltantes:
+        st.error(f"Colunas não encontradas na aba 'Nova base': {', '.join(sorted(faltantes))}")
         st.stop()
 
-    col_rs = achar_coluna(df.columns, "razaosocial")
-    if not col_rs:
-        st.error(f"Coluna 'Razao Social' não encontrada. Colunas disponíveis: {list(df.columns)}")
-        st.stop()
-
-    col_sit = achar_coluna(df.columns, "situacao", "cadastro")
-    if not col_sit:
-        st.error(f"Coluna 'Situacao do Cadastro' não encontrada. Colunas disponíveis: {list(df.columns)}")
-        st.stop()
-
-    df = df.rename(columns={col_mun: "Município", col_qtd: COL_QTD, col_rs: "Razao Social", col_sit: "Situacao"})
+    df = df.rename(columns=colunas)
+    df["codigo"] = pd.to_numeric(df["codigo"], errors="coerce").astype("Int64").astype("string")
     df[COL_QTD] = pd.to_numeric(df[COL_QTD].astype(str).str.replace(",", ".", regex=False), errors="coerce")
-    df["chave"] = df["Município"].map(normalizar)
+    for coluna in ["Produz Cafe", "Tem Sindicato"]:
+        df[coluna] = df[coluna].map(
+            lambda valor: False if pd.isna(valor) else valor == 1 or normalizar(valor) in {"sim", "s", "true", "yes"}
+        )
     df["Razao Social"] = df["Razao Social"].fillna("").astype(str).str.strip()
     # Produção é a mesma nas repetições (não soma); apenas os nomes são reunidos.
     df["Situacao"] = df["Situacao"].fillna("").astype(str).str.strip()
     juntar = lambda s: " e ".join(dict.fromkeys(n for n in s if n))
     sindicatos = (
-        df.groupby("chave")
-        .agg(Sindicato=("Razao Social", juntar), Situacao=("Situacao", juntar))
+        df.groupby("codigo")
+        .agg(
+            Sindicato=("Razao Social", juntar),
+            Situacao=("Situacao", juntar),
+            **{"Produz Cafe": ("Produz Cafe", "any"), "Tem Sindicato": ("Tem Sindicato", "any")},
+        )
         .reset_index()
     )
-    unico = df.drop_duplicates(subset="chave", keep="first")[["chave", "Município", COL_QTD]]
-    return unico.merge(sindicatos, on="chave")
+    unico = df.drop_duplicates(subset="codigo", keep="first")[["codigo", "Município", COL_QTD]]
+    return unico.merge(sindicatos, on="codigo", how="left")
 
 
-st.title("Produção de Café por Município – Minas Gerais")
+st.title("Municípios Produtores de Café - Minas Gerais - 2025")
 
 try:
     with st.spinner("Carregando dados geográficos locais..."):
@@ -95,18 +101,47 @@ except (OSError, ValueError) as erro:
         st.rerun()
     st.stop()
 
-dados = carregar_dados()
-mapa = ibge.merge(dados[["chave", COL_QTD, "Sindicato", "Situacao"]], on="chave", how="left")
+st.markdown(
+    "<style>"
+    '.st-key-filtro_sindicato [role="radiogroup"] { justify-content: flex-end; }'
+    '.st-key-filtro_sindicato [role="radiogroup"] > label:last-child { margin-right: 0; }'
+    '.st-key-filtro_sindicato [data-testid="stWidgetLabel"] { justify-content: flex-end; text-align: right; }'
+    "</style>",
+    unsafe_allow_html=True,
+)
+with st.container(key="filtro_sindicato"):
+    filtro_sindicato = st.radio(
+        "",
+        ["Com sindicato", "Sem sindicato", "Ambos"],
+        index=2,
+        horizontal=True,
+        width="stretch",
+    )
+try:
+    dados = carregar_dados()
+except (OSError, ValueError) as erro:
+    st.error("Não foi possível ler a aba 'Nova base' de EntidadesSindicais2.xlsx. Verifique o arquivo e feche-o no Excel se estiver aberto.")
+    st.caption(f"Detalhes técnicos: {erro}")
+    st.stop()
+mapa = ibge.merge(
+    dados[["codigo", COL_QTD, "Sindicato", "Situacao", "Produz Cafe", "Tem Sindicato"]],
+    on="codigo", how="left",
+)
 com_dados = mapa.dropna(subset=[COL_QTD])
-nao_encontrados = dados.loc[~dados["chave"].isin(ibge["chave"]), "Município"].tolist()
+nao_encontrados = dados.loc[~dados["codigo"].isin(ibge["codigo"]), "Município"].tolist()
 
 producao = dict(zip(mapa["codigo"], mapa[COL_QTD]))
 nomes = dict(zip(mapa["codigo"], mapa["Município IBGE"]))
 sindicatos = dict(zip(mapa["codigo"], mapa["Sindicato"]))
 situacoes = dict(zip(mapa["codigo"], mapa["Situacao"]))
+produz_cafe = dict(zip(mapa["codigo"], mapa["Produz Cafe"].eq(True)))
+tem_sindicato = dict(zip(mapa["codigo"], mapa["Tem Sindicato"].eq(True)))
 max_producao = float(mapa[COL_QTD].max()) if not com_dados.empty else 1
 escala = linear.YlOrRd_09.scale(0, max(max_producao, 1))
-escala.caption = "Quantidade produzida (Ton)"
+escala.caption = "Com sindicato - Produção (Ton)"
+escala_azul = linear.Blues_09.scale(0, max(max_producao, 1))
+escala_azul.caption = "Sem sindicato - Produção (Ton)"
+escala_azul.position = "bottomleft"
 
 for feature in malha["features"]:
     codigo = str(feature["properties"]["codarea"])
@@ -115,6 +150,18 @@ for feature in malha["features"]:
         valor_producao = None
     feature["properties"]["municipio_nome"] = nomes.get(codigo, "")
     feature["properties"]["producao_ton"] = valor_producao
+    possui_sindicato = tem_sindicato.get(codigo, False)
+    visivel = (
+        filtro_sindicato == "Ambos"
+        or (filtro_sindicato == "Com sindicato" and possui_sindicato)
+        or (filtro_sindicato == "Sem sindicato" and not possui_sindicato)
+    )
+    colorido = produz_cafe.get(codigo, False) and valor_producao is not None and valor_producao > 0 and visivel
+    feature["properties"]["colorido"] = colorido
+    feature["properties"]["cor"] = (
+        (escala if possui_sindicato else escala_azul)(valor_producao)
+        if colorido else "#22252a"
+    )
     nome_sindicato = sindicatos.get(codigo)
     feature["properties"]["sindicato"] = nome_sindicato if isinstance(nome_sindicato, str) and nome_sindicato else "-"
     situacao = situacoes.get(codigo)
@@ -139,12 +186,10 @@ folium.TileLayer(
 camada = folium.GeoJson(
     malha,
     style_function=lambda feature: {
-        "fillColor": escala(feature["properties"]["producao_ton"])
-        if feature["properties"]["producao_ton"] is not None
-        else "#22252a",
-        "color": "#d4d4d4" if feature["properties"]["producao_ton"] is not None else "#34383d",
-        "weight": 0.45 if feature["properties"]["producao_ton"] is not None else 0.25,
-        "fillOpacity": 0.8 if feature["properties"]["producao_ton"] is not None else 0,
+        "fillColor": feature["properties"]["cor"],
+        "color": "#d4d4d4" if feature["properties"]["colorido"] else "#34383d",
+        "weight": 0.45 if feature["properties"]["colorido"] else 0.25,
+        "fillOpacity": 0.8 if feature["properties"]["colorido"] else 0,
     },
     tooltip=folium.GeoJsonTooltip(
         fields=["municipio_nome", "sindicato", "situacao", "producao_label"],
@@ -167,7 +212,10 @@ folium.GeoJson(
     control=False,
     interactive=False,
 ).add_to(mapa_folium)
-escala.add_to(mapa_folium)
+if filtro_sindicato != "Sem sindicato":
+    escala.add_to(mapa_folium)
+if filtro_sindicato != "Com sindicato":
+    escala_azul.add_to(mapa_folium)
 folium.Element(
     "<style>.legend text { fill: #ffffff !important; }"
     ".leaflet-tooltip { white-space: normal !important; width: max-content; max-width: 380px; }"
