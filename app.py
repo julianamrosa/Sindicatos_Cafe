@@ -100,7 +100,9 @@ def carregar_dados():
     sindicatos["Situacao"] = sindicatos["registros_sindicatos"].map(
         lambda registros: juntar(registro["situacao"] for registro in registros)
     )
-    sindicatos["Tem Sindicato"] = sindicatos["Tem Sindicato"] | sindicatos["registros_sindicatos"].map(bool)
+    sindicatos["Tem Sindicato"] = sindicatos["Tem Sindicato"] | sindicatos["registros_sindicatos"].map(
+        lambda registros: len(registros) > 0
+    )
     unico = df.drop_duplicates(subset="codigo", keep="first")[["codigo", "Município", COL_QTD]]
     return unico.merge(sindicatos, on="codigo", how="left")
 
