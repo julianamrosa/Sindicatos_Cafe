@@ -2,6 +2,7 @@ import json
 import re
 import unicodedata
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 import folium
@@ -107,20 +108,120 @@ def carregar_dados():
     return unico.merge(sindicatos, on="codigo", how="left")
 
 
-def adicionar_tabela(mapa_folium, camada):
+def criar_componentes(mapa_folium, camada):
+    canal = f"municipios-{uuid4().hex}"
+    interacao_mapa = MacroElement()
+    interacao_mapa.mapa = mapa_folium.get_name()
+    interacao_mapa.camada = camada.get_name()
+    interacao_mapa.canal = canal
+    interacao_mapa._template = Template("""
+        {% macro header(this, kwargs) %}
+        <style>
+            html, body { background: transparent !important; }
+            #{{ this.mapa }} { height: 760px !important; background: #414143; }
+        </style>
+        {% endmacro %}
+        {% macro script(this, kwargs) %}
+        (() => {
+            const mapa = {{ this.mapa }};
+            const camada = {{ this.camada }};
+            const municipios = camada.getLayers();
+            const canal = new BroadcastChannel({{ this.canal | tojson }});
+            const selecionados = new Set();
+            const estilos = new Map(municipios.map(municipio => [municipio, {...municipio.options}]));
+            const tooltip = camada.getTooltip();
+            camada.unbindTooltip();
+            municipios.forEach(municipio => municipio.bindTooltip(
+                tooltip.getContent(), {...tooltip.options}));
+
+            function enviarEstado() {
+                canal.postMessage({tipo: 'estado', selecionados: [...selecionados]});
+            }
+
+            function atualizar() {
+                municipios.forEach(municipio => {
+                    const ativo = selecionados.has(String(municipio.feature.properties.codarea));
+                    const estilo = estilos.get(municipio);
+                    municipio.setStyle(ativo ? {
+                        fillColor: estilo.fillColor, fillOpacity: 0.9,
+                        color: '#f5d76e', weight: 2.5, opacity: 1
+                    } : {
+                        fillColor: estilo.fillColor, color: estilo.color, weight: estilo.weight,
+                        fillOpacity: selecionados.size ? estilo.fillOpacity * 0.2 : estilo.fillOpacity,
+                        opacity: selecionados.size ? 0.25 : 1
+                    });
+                    if (ativo) municipio.bringToFront();
+                    else municipio.closeTooltip();
+                });
+                enviarEstado();
+            }
+
+            function limparSelecao() {
+                selecionados.clear();
+                atualizar();
+            }
+
+            function selecionar(municipio, multipla = false, origemMapa = false) {
+                const codigo = String(municipio.feature.properties.codarea);
+                if (multipla) {
+                    if (selecionados.has(codigo)) selecionados.delete(codigo);
+                    else selecionados.add(codigo);
+                } else if ((origemMapa && selecionados.size) || selecionados.has(codigo)) {
+                    limparSelecao();
+                    return;
+                } else {
+                    selecionados.clear();
+                    selecionados.add(codigo);
+                }
+                atualizar();
+                if (selecionados.has(codigo)) municipio.openTooltip(municipio.getBounds().getCenter());
+            }
+
+            municipios.forEach(municipio => {
+                municipio.options.bubblingMouseEvents = false;
+                municipio.on('click', evento => selecionar(municipio,
+                    Boolean(evento.originalEvent?.ctrlKey || evento.originalEvent?.metaKey), true));
+            });
+            mapa.on('click', limparSelecao);
+            canal.onmessage = evento => {
+                const mensagem = evento.data;
+                if (mensagem.tipo === 'solicitar_estado') enviarEstado();
+                else if (mensagem.tipo === 'limpar') limparSelecao();
+                else if (mensagem.tipo === 'selecionar') {
+                    const municipio = municipios.find(item =>
+                        String(item.feature.properties.codarea) === mensagem.codigo);
+                    if (municipio) selecionar(municipio, mensagem.multipla);
+                }
+            };
+            window.addEventListener('pagehide', () => canal.close(), {once: true});
+            atualizar();
+        })();
+        {% endmacro %}
+    """)
+    interacao_mapa.add_to(mapa_folium)
     tabela = MacroElement()
-    tabela.mapa = mapa_folium.get_name()
-    tabela.camada = camada.get_name()
+    tabela.canal = canal
+    tabela.total = len(camada.data["features"])
+    tabela.registros = []
+    for feature in camada.data["features"]:
+        propriedades = feature["properties"]
+        for sindicato in propriedades["registros_sindicatos"] or [{"sindicato": "-", "situacao": "-"}]:
+            tabela.registros.append({
+                "codigo": str(propriedades["codarea"]),
+                "municipio": propriedades["municipio_nome"],
+                "sindicato": sindicato["sindicato"],
+                "situacao": sindicato["situacao"] or "-",
+                "producao": propriedades["producao_label"],
+            })
     tabela._template = Template("""
         {% macro header(this, kwargs) %}
         <style>
-            html, body { background: #0e1117 !important; color-scheme: dark; }
-            #{{ this.mapa }} { height: 760px !important; }
-            .municipios { margin-top: 32px; padding: 16px 0; font-family: sans-serif;
-                color: #f0f2f6; background: #0e1117; color-scheme: dark; }
+            :root { --fundo-mapa: #414143; }
+            html, body { margin: 0; background: transparent !important; }
+            .municipios { padding: 12px; font-family: sans-serif;
+                color: #f0f2f6; background: var(--fundo-mapa); color-scheme: dark; }
             .municipios-rodape { display: flex; align-items: center; flex-wrap: wrap;
                 gap: 12px; margin-top: 16px; }
-            .municipios h2 { font-size: 20px; margin: 0 0 16px; }
             .municipios button { border: 1px solid #5b616c; border-radius: 4px;
                 background: #262a33; padding: 6px 12px; color: #f0f2f6; }
             .municipios button:disabled { opacity: .5; }
@@ -133,8 +234,9 @@ def adicionar_tabela(mapa_folium, camada):
             .municipios-busca input:not(:placeholder-shown) { padding-left: 12px; }
             .municipios-busca input:not(:placeholder-shown) + .municipios-busca-icone { display: none; }
             .municipios-rolagem { max-height: 320px; overflow: auto; }
-            .municipios table { width: 100%; border-collapse: collapse; font-size: 14px; }
-            .municipios th { position: sticky; top: 0; background: #262a33; z-index: 1; }
+            .municipios table { width: 100%; border-collapse: collapse; font-size: 14px;
+                background: var(--fundo-mapa); }
+            .municipios th { position: sticky; top: 0; background: var(--fundo-mapa); z-index: 1; }
             .municipios th, .municipios td { padding: 10px 12px; border-bottom: 1px solid #363b45;
                 text-align: left; vertical-align: top; overflow-wrap: anywhere; min-width: 130px; }
             .municipios td:last-child, .municipios th:last-child { text-align: right; }
@@ -147,7 +249,6 @@ def adicionar_tabela(mapa_folium, camada):
         {% endmacro %}
         {% macro html(this, kwargs) %}
         <section class="municipios" aria-label="Tabela de municípios">
-            <h2>Informações dos Sindicatos de Café</h2>
             <div class="municipios-busca">
                 <input id="{{ this.get_name() }}_busca" type="search" autocomplete="off"
                     aria-label="Buscar município" placeholder=" ">
@@ -168,43 +269,19 @@ def adicionar_tabela(mapa_folium, camada):
         {% endmacro %}
         {% macro script(this, kwargs) %}
         (() => {
-            const mapa = {{ this.mapa }};
-            const camada = {{ this.camada }};
-            const municipios = camada.getLayers().sort((primeiro, segundo) =>
-                primeiro.feature.properties.municipio_nome.localeCompare(
-                    segundo.feature.properties.municipio_nome, 'pt-BR'));
-            const tooltip = camada.getTooltip();
-            camada.unbindTooltip();
-            municipios.forEach(municipio => municipio.bindTooltip(
-                tooltip.getContent(), {...tooltip.options}));
+            const canal = new BroadcastChannel({{ this.canal | tojson }});
+            const dados = {{ this.registros | tojson }};
+            dados.sort((primeiro, segundo) => primeiro.municipio.localeCompare(segundo.municipio, 'pt-BR'));
             const linhas = document.getElementById('{{ this.get_name() }}_linhas');
             const contagem = document.getElementById('{{ this.get_name() }}_contagem');
             const limpar = document.getElementById('{{ this.get_name() }}_limpar');
             const busca = document.getElementById('{{ this.get_name() }}_busca');
-            const selecionados = new Set();
-            const estilos = new Map(municipios.map(municipio => [municipio, {...municipio.options}]));
+            let selecionados = new Set();
             const registros = [];
             const normalizarBusca = texto => texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
                 .toLocaleLowerCase('pt-BR').trim();
 
             function atualizar() {
-                municipios.forEach(municipio => {
-                    const ativo = selecionados.has(String(municipio.feature.properties.codarea));
-                    const estilo = estilos.get(municipio);
-                    municipio.setStyle(ativo ? {
-                        fillColor: estilo.fillColor, fillOpacity: 0.9,
-                        color: '#f5d76e', weight: 2.5, opacity: 1
-                    } : {
-                        fillColor: estilo.fillColor, color: estilo.color, weight: estilo.weight,
-                        fillOpacity: selecionados.size ? estilo.fillOpacity * 0.2 : estilo.fillOpacity,
-                        opacity: selecionados.size ? 0.25 : 1
-                    });
-                    if (ativo) {
-                        municipio.bringToFront();
-                    } else {
-                        municipio.closeTooltip();
-                    }
-                });
                 const termo = normalizarBusca(busca.value);
                 const filtrados = registros.filter(registro =>
                     (!selecionados.size || selecionados.has(registro.codigo)) && registro.nome.includes(termo));
@@ -218,76 +295,65 @@ def adicionar_tabela(mapa_folium, camada):
                     celula.colSpan = 4;
                     celula.textContent = 'Nenhum município encontrado.';
                 }
-                const exibidos = new Set(filtrados.map(registro => registro.codigo));
-                contagem.textContent = selecionados.size + ' município(s) selecionado(s) de ' + municipios.length
+                contagem.textContent = selecionados.size + ' município(s) selecionado(s) de ' + {{ this.total }}
                     + ' ';
                 limpar.disabled = selecionados.size === 0 && !busca.value;
             }
 
-            function limparSelecao() {
-                selecionados.clear();
-                atualizar();
+            function selecionar(codigo, evento) {
+                canal.postMessage({tipo: 'selecionar', codigo,
+                    multipla: Boolean(evento.ctrlKey || evento.metaKey)});
             }
 
-            function selecionar(municipio, evento = {}, origemMapa = false) {
-                const codigo = String(municipio.feature.properties.codarea);
-                if (evento.ctrlKey || evento.metaKey) {
-                    if (selecionados.has(codigo)) selecionados.delete(codigo);
-                    else selecionados.add(codigo);
-                } else if ((origemMapa && selecionados.size) || selecionados.has(codigo)) {
-                    limparSelecao();
-                    return;
-                } else {
-                    selecionados.clear();
-                    selecionados.add(codigo);
-                }
-                atualizar();
-                if (selecionados.has(codigo)) municipio.openTooltip(municipio.getBounds().getCenter());
-                if (origemMapa) linhas.closest('.municipios-rolagem').scrollTop = 0;
-            }
-
-            municipios.forEach(municipio => {
-                const propriedades = municipio.feature.properties;
-                const sindicatos = propriedades.registros_sindicatos.length
-                    ? propriedades.registros_sindicatos : [{sindicato: '-', situacao: '-'}];
-                sindicatos.forEach(sindicato => {
+            dados.forEach(dado => {
                     const linha = document.createElement('tr');
                     linha.tabIndex = 0;
-                    linha.dataset.codigo = String(propriedades.codarea);
-                    [propriedades.municipio_nome, sindicato.sindicato, sindicato.situacao || '-',
-                        propriedades.producao_label].forEach(valor => {
+                    linha.dataset.codigo = dado.codigo;
+                    [dado.municipio, dado.sindicato, dado.situacao, dado.producao].forEach(valor => {
                         const celula = document.createElement('td');
                         celula.textContent = valor;
                         linha.appendChild(celula);
                     });
-                    linha.addEventListener('click', evento => selecionar(municipio, evento));
+                    linha.addEventListener('click', evento => selecionar(dado.codigo, evento));
                     linha.addEventListener('keydown', evento => {
                         if (evento.key === 'Enter' || evento.key === ' ') {
                             evento.preventDefault();
-                            selecionar(municipio, evento);
+                            selecionar(dado.codigo, evento);
                         }
                     });
-                    registros.push({codigo: String(propriedades.codarea),
-                        nome: normalizarBusca(propriedades.municipio_nome), linha});
+                    registros.push({codigo: dado.codigo, nome: normalizarBusca(dado.municipio), linha});
                     linhas.appendChild(linha);
-                });
-                municipio.options.bubblingMouseEvents = false;
-                municipio.on('click', evento => selecionar(municipio, evento.originalEvent, true));
             });
-            mapa.on('click', limparSelecao);
+            canal.onmessage = evento => {
+                if (evento.data.tipo !== 'estado') return;
+                selecionados = new Set(evento.data.selecionados);
+                atualizar();
+                linhas.closest('.municipios-rolagem').scrollTop = 0;
+            };
             busca.addEventListener('input', () => {
                 atualizar();
                 linhas.closest('.municipios-rolagem').scrollTop = 0;
             });
             limpar.addEventListener('click', () => {
                 busca.value = '';
-                limparSelecao();
+                selecionados.clear();
+                atualizar();
+                canal.postMessage({tipo: 'limpar'});
             });
+            window.addEventListener('pagehide', () => canal.close(), {once: true});
             atualizar();
+            canal.postMessage({tipo: 'solicitar_estado'});
         })();
         {% endmacro %}
     """)
-    tabela.add_to(mapa_folium)
+    template = tabela._template.module
+    html_tabela = (
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.2.0/css/all.min.css">'
+        f'{template.header(tabela, {})}</head><body>{template.html(tabela, {})}'
+        f'<script>{template.script(tabela, {})}</script></body></html>'
+    )
+    return mapa_folium.get_root().render(), html_tabela
 
 
 st.title("Municípios Produtores de Café - Minas Gerais - 2025")
@@ -340,8 +406,8 @@ nomes = dict(zip(mapa["codigo"], mapa["Município IBGE"]))
 sindicatos = dict(zip(mapa["codigo"], mapa["Sindicato"]))
 situacoes = dict(zip(mapa["codigo"], mapa["Situacao"]))
 registros_sindicatos = dict(zip(mapa["codigo"], mapa["registros_sindicatos"]))
-produz_cafe = dict(zip(mapa["codigo"], mapa["Produz Cafe"].eq(True)))
-tem_sindicato = dict(zip(mapa["codigo"], mapa["Tem Sindicato"].eq(True)))
+produz_cafe = dict(zip(mapa["codigo"], mapa["Produz Cafe"].eq(True).fillna(False)))
+tem_sindicato = dict(zip(mapa["codigo"], mapa["Tem Sindicato"].eq(True).fillna(False)))
 max_producao = float(mapa[COL_QTD].max()) if not com_dados.empty else 1
 escala = linear.YlOrRd_09.scale(0, max(max_producao, 1))
 escala.caption = "Com sindicato - Produção (Ton)"
@@ -433,9 +499,11 @@ folium.Element(
     ".leaflet-tooltip table { white-space: normal !important; }</style>"
 ).add_to(mapa_folium.get_root().header)
 
-adicionar_tabela(mapa_folium, camada)
+html_mapa, html_tabela = criar_componentes(mapa_folium, camada)
 st.subheader("Produção de Café em Toneladas")
-components.html(mapa_folium.get_root().render(), height=1400, scrolling=False)
+components.html(html_mapa, height=760, scrolling=False)
+st.subheader("Informações dos Sindicatos de Café")
+components.html(html_tabela, height=520, scrolling=False)
 
 if nao_encontrados:
     with st.expander(f"{len(nao_encontrados)} município(s) da planilha não encontrados no IBGE"):
